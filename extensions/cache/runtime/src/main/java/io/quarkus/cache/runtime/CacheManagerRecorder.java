@@ -3,11 +3,15 @@ package io.quarkus.cache.runtime;
 import static io.quarkus.cache.runtime.CacheBuildConfig.CAFFEINE_CACHE_TYPE;
 
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
 import jakarta.enterprise.inject.spi.DeploymentException;
 
+import io.quarkus.cache.Cache;
 import io.quarkus.cache.CacheManager;
 import io.quarkus.cache.CacheManagerInfo;
 import io.quarkus.cache.runtime.caffeine.CaffeineCacheManagerBuilder;
@@ -26,13 +30,15 @@ public class CacheManagerRecorder {
         this.cacheConfigRV = cacheConfigRV;
     }
 
-    public Supplier<CacheManager> resolveCacheInfo(Collection<CacheManagerInfo> infos, Set<String> cacheNames,
+    private CacheManagerInfo.Context createContextForCacheType(
+            String cacheType,
             boolean micrometerMetricsEnabled) {
-        CacheConfig cacheConfig = cacheConfigRV.getValue();
-        CacheManagerInfo.Context context = new CacheManagerInfo.Context() {
+        return new CacheManagerInfo.Context() {
+            private final Set<String> cacheNames = new HashSet<>();
+
             @Override
             public boolean cacheEnabled() {
-                return cacheConfig.enabled();
+                return cacheConfigRV.getValue().enabled();
             }
 
             @Override
@@ -42,7 +48,7 @@ public class CacheManagerRecorder {
 
             @Override
             public String cacheType() {
-                return cacheBuildConfig.type();
+                return cacheType;
             }
 
             @Override
@@ -50,12 +56,91 @@ public class CacheManagerRecorder {
                 return cacheNames;
             }
         };
+    }
+
+    private Map<String, String> mapCacheTypeByCacheName(Set<String> cacheNames) {
+        Map<String, String> cacheTypeByName = new HashMap<>(cacheNames.size());
+        for (String cacheName : cacheNames) {
+            CacheTypeBuildConfig cacheTypeBuildConfig = cacheBuildConfig.cacheTypeByName().get(cacheName);
+            // check if the cache type is defined for this cache name "quarkus.cache.<cache-name>.type"
+            if (cacheTypeBuildConfig != null &&
+                    cacheTypeBuildConfig.type() != null &&
+                    !cacheTypeBuildConfig.type().isEmpty()) {
+                cacheTypeByName.put(cacheName, cacheTypeBuildConfig.type());
+            } else {
+                // if not, use the default cache type defined "quarkus.cache.type"
+                cacheTypeByName.put(cacheName, cacheBuildConfig.type());
+            }
+        }
+        return cacheTypeByName;
+    }
+
+    private Supplier<Map<String, Cache>> findSupplierForType(
+            String cacheType,
+            CacheManagerInfo.Context context,
+            Collection<CacheManagerInfo> infos) {
         for (CacheManagerInfo info : infos) {
             if (info.supports(context)) {
                 return info.get(context);
             }
         }
-        throw new DeploymentException("Unknown cache type: " + context.cacheType());
+        throw new DeploymentException("Unknown cache type: " + cacheType);
+    }
+
+    private Map<String, Supplier<Map<String, Cache>>> createCacheSupplierByCacheType(
+            Collection<CacheManagerInfo> infos,
+            Set<String> cacheNames,
+            boolean micrometerMetricsEnabled) {
+
+        Map<String, String> cacheTypeByCacheName = mapCacheTypeByCacheName(cacheNames);
+
+        // create one context per cache type with their corresponding list of cache names
+        Map<String, CacheManagerInfo.Context> contextByCacheType = new HashMap<>(cacheNames.size());
+        for (String cacheName : cacheNames) {
+            contextByCacheType.computeIfAbsent(
+                    cacheTypeByCacheName.get(cacheName),
+                    cacheType -> this.createContextForCacheType(cacheType, micrometerMetricsEnabled))
+                    .cacheNames()
+                    .add(cacheName);
+        }
+
+        // suppliers grouped by cache type
+        Map<String, Supplier<Map<String, Cache>>> suppliersByType = new HashMap<>();
+        for (Map.Entry<String, CacheManagerInfo.Context> entry : contextByCacheType.entrySet()) {
+            String cacheType = entry.getKey();
+            if (!suppliersByType.containsKey(cacheType)) {
+                suppliersByType.put(cacheType, findSupplierForType(cacheType, entry.getValue(), infos));
+            }
+        }
+
+        return suppliersByType;
+    }
+
+    public Supplier<CacheManager> resolveCacheInfo(
+            Collection<CacheManagerInfo> infos, Set<String> cacheNames,
+            boolean micrometerMetricsEnabled) {
+
+        Map<String, Supplier<Map<String, Cache>>> suppliersByType = createCacheSupplierByCacheType(
+                infos,
+                cacheNames,
+                micrometerMetricsEnabled);
+
+        return new Supplier<CacheManager>() {
+            @Override
+            public CacheManager get() {
+                // get the cache implementation by cache type of each Supplier
+                Map<String, Map<String, Cache>> cacheImplByCacheType = new HashMap<>();
+                for (Map.Entry<String, Supplier<Map<String, Cache>>> entry : suppliersByType.entrySet()) {
+                    cacheImplByCacheType.put(entry.getKey(), entry.getValue().get());
+                }
+                // put all cache implementations together in a single map indexed by cache name
+                Map<String, Cache> allCaches = new HashMap<>();
+                for (Map<String, Cache> caches : cacheImplByCacheType.values()) {
+                    allCaches.putAll(caches);
+                }
+                return new CacheManagerImpl(allCaches);
+            }
+        };
     }
 
     public CacheManagerInfo noOpCacheManagerInfo() {
@@ -66,7 +151,7 @@ public class CacheManagerRecorder {
             }
 
             @Override
-            public Supplier<CacheManager> get(Context context) {
+            public Supplier<Map<String, Cache>> get(Context context) {
                 return NoOpCacheManagerBuilder.build(context.cacheNames());
             }
         };
@@ -81,7 +166,7 @@ public class CacheManagerRecorder {
             }
 
             @Override
-            public Supplier<CacheManager> get(Context context) {
+            public Supplier<Map<String, Cache>> get(Context context) {
                 return CaffeineCacheManagerBuilder.buildWithMicrometerMetrics(context.cacheNames(), cacheConfigRV.getValue());
             }
         };
@@ -96,7 +181,7 @@ public class CacheManagerRecorder {
             }
 
             @Override
-            public Supplier<CacheManager> get(Context context) {
+            public Supplier<Map<String, Cache>> get(Context context) {
                 return CaffeineCacheManagerBuilder.buildWithoutMetrics(context.cacheNames(), cacheConfigRV.getValue());
             }
         };

@@ -1,5 +1,6 @@
 package io.quarkus.cache;
 
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -7,7 +8,7 @@ public interface CacheManagerInfo {
 
     boolean supports(Context context);
 
-    Supplier<CacheManager> get(Context context);
+    Supplier<Map<String, Cache>> get(Context context);
 
     interface Context {
 

@@ -9,9 +9,7 @@ import java.util.function.Supplier;
 import org.jboss.logging.Logger;
 
 import io.quarkus.cache.Cache;
-import io.quarkus.cache.CacheManager;
 import io.quarkus.cache.runtime.CacheConfig;
-import io.quarkus.cache.runtime.CacheManagerImpl;
 import io.quarkus.cache.runtime.caffeine.metrics.MetricsInitializer;
 import io.quarkus.cache.runtime.caffeine.metrics.MicrometerMetricsInitializer;
 import io.quarkus.cache.runtime.caffeine.metrics.NoOpMetricsInitializer;
@@ -20,22 +18,22 @@ public class CaffeineCacheManagerBuilder {
 
     private static final Logger LOGGER = Logger.getLogger(CaffeineCacheManagerBuilder.class);
 
-    public static Supplier<CacheManager> buildWithMicrometerMetrics(Set<String> cacheNames, CacheConfig cacheConfig) {
+    public static Supplier<Map<String, Cache>> buildWithMicrometerMetrics(Set<String> cacheNames, CacheConfig cacheConfig) {
         return build(cacheNames, cacheConfig, new MicrometerMetricsInitializer());
     }
 
-    public static Supplier<CacheManager> buildWithoutMetrics(Set<String> cacheNames, CacheConfig cacheConfig) {
+    public static Supplier<Map<String, Cache>> buildWithoutMetrics(Set<String> cacheNames, CacheConfig cacheConfig) {
         return build(cacheNames, cacheConfig, new NoOpMetricsInitializer());
     }
 
-    private static Supplier<CacheManager> build(Set<String> cacheNames, CacheConfig cacheConfig,
+    private static Supplier<Map<String, Cache>> build(Set<String> cacheNames, CacheConfig cacheConfig,
             MetricsInitializer metricsInitializer) {
         Set<CaffeineCacheInfo> cacheInfos = CaffeineCacheInfoBuilder.build(cacheNames, cacheConfig);
-        return new Supplier<CacheManager>() {
+        return new Supplier<Map<String, Cache>>() {
             @Override
-            public CacheManager get() {
+            public Map<String, Cache> get() {
                 if (cacheInfos.isEmpty()) {
-                    return new CacheManagerImpl(Collections.emptyMap());
+                    return Collections.emptyMap();
                 } else {
                     // The number of caches is known at build time so we can use fixed initialCapacity and loadFactor for the caches map.
                     Map<String, Cache> caches = new HashMap<>(cacheInfos.size() + 1, 1.0F);
@@ -65,7 +63,7 @@ public class CaffeineCacheManagerBuilder {
                         }
                         caches.put(cacheInfo.name, cache);
                     }
-                    return new CacheManagerImpl(caches);
+                    return caches;
                 }
             }
         };
